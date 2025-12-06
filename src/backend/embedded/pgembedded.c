@@ -287,12 +287,19 @@ pg_embedded_init(const char *data_dir, const char *dbname, const char *username)
 											   "MessageContext",
 											   ALLOCSET_DEFAULT_SIZES);
 
-		/* Connect to SPI (Server Programming Interface) */
+		/*
+		 * Perform an empty transaction to finalize SPI setup.
+		 * This ensures the system is ready for query execution.
+		 */
+		StartTransactionCommand();
 		if (SPI_connect() != SPI_OK_CONNECT)
 		{
 			snprintf(pg_error_msg, sizeof(pg_error_msg), "SPI_connect failed");
+			AbortCurrentTransaction();
 			return -1;
 		}
+		SPI_finish();
+		CommitTransactionCommand();
 
 		pg_initialized = true;
 	}
@@ -350,18 +357,36 @@ pg_embedded_exec(const char *query)
 
 	PG_TRY();
 	{
-		/*
-		 * Start a transaction if not already in one.
-		 * This sets up CurrentResourceOwner which SPI needs.
-		 */
-		if (!IsTransactionState())
-			StartTransactionCommand();
+		bool		implicit_tx = false;
 
 		/*
-		 * Push an active snapshot for query execution.
+		 * Transaction Handling Strategy:
+		 * If we are NOT in a transaction, we act as "Auto-commit":
+		 * Start -> Exec -> Commit.
+		 * If we ARE in a transaction (via pg_embedded_begin), we just Exec.
+		 */
+		if (!IsTransactionState())
+		{
+			StartTransactionCommand();
+			implicit_tx = true;
+		}
+
+		/*
 		 * SPI requires a snapshot to be active.
+		 * Push an active snapshot for query execution.
 		 */
 		PushActiveSnapshot(GetTransactionSnapshot());
+
+		/* Connect to SPI for this query */
+		if (SPI_connect() != SPI_OK_CONNECT)
+		{
+			snprintf(pg_error_msg, sizeof(pg_error_msg), "SPI_connect failed");
+			PopActiveSnapshot();
+			if (implicit_tx)
+				AbortCurrentTransaction();
+			result->status = -1;
+			return result;
+		}
 
 		/* Execute query via SPI */
 		ret = SPI_execute(query, false, 0);		/* false = read-write, 0 = no
@@ -377,11 +402,16 @@ pg_embedded_exec(const char *query)
 		{
 			snprintf(pg_error_msg, sizeof(pg_error_msg),
 					 "Query execution failed with code: %d", ret);
+			PopActiveSnapshot();
+			if (implicit_tx)
+				AbortCurrentTransaction();
 			return result;
 		}
 
-		/* For SELECT queries, copy result data */
-		if (ret == SPI_OK_SELECT && SPI_tuptable != NULL)
+		/*
+		 * Copy data for queries with results (SELECT or RETURNING)
+		 */
+		if (ret > 0 && SPI_tuptable != NULL)
 		{
 			SPITupleTable *tuptable = SPI_tuptable;
 			TupleDesc	tupdesc = tuptable->tupdesc;
@@ -432,13 +462,12 @@ pg_embedded_exec(const char *query)
 				/* Get each column value */
 				for (col = 0; col < result->cols; col++)
 				{
-					bool		isnull;
 					char	   *str;
 
 					str = SPI_getvalue(tuple, tupdesc, col + 1);
 
 					if (str == NULL)
-						result->values[row][col] = strdup("NULL");
+						result->values[row][col] = NULL;
 					else
 					{
 						result->values[row][col] = strdup(str);
@@ -448,17 +477,21 @@ pg_embedded_exec(const char *query)
 			}
 		}
 
+		/* Disconnect from SPI */
+		SPI_finish();
+
 		/*
 		 * Pop the active snapshot.
 		 */
 		PopActiveSnapshot();
 
 		/*
-		 * Note: We don't commit the transaction here. Transactions are managed
-		 * explicitly by the caller using BEGIN/COMMIT/ROLLBACK, or implicitly
-		 * by the SPI layer. Committing here would interfere with multi-statement
-		 * transactions.
+		 * If we started the transaction implicitly (auto-commit mode),
+		 * commit it now. Otherwise, the transaction was started explicitly
+		 * via pg_embedded_begin() and the caller will manage it.
 		 */
+		if (implicit_tx)
+			CommitTransactionCommand();
 	}
 	PG_CATCH();
 	{
@@ -474,10 +507,11 @@ pg_embedded_exec(const char *query)
 		FreeErrorData(edata);
 
 		/*
-		 * Note: We don't abort the transaction here either. Let the caller
-		 * decide whether to commit or rollback. PostgreSQL's error handling
-		 * will mark the transaction as aborted if needed.
+		 * Abort the current transaction to release locks and clean up
+		 * resources. This is safe whether we started the transaction
+		 * implicitly or it was started explicitly.
 		 */
+		AbortCurrentTransaction();
 
 		/* Clean up and return partial result with error */
 		result->status = -1;
@@ -542,79 +576,110 @@ pg_embedded_free_result(pg_result *result)
 int
 pg_embedded_begin(void)
 {
-	pg_result  *result;
-
 	if (!pg_initialized)
 	{
 		snprintf(pg_error_msg, sizeof(pg_error_msg), "Not initialized");
 		return -1;
 	}
 
-	result = pg_embedded_exec("BEGIN");
-	if (result == NULL || result->status < 0)
+	if (IsTransactionState())
 	{
-		if (result)
-			pg_embedded_free_result(result);
+		snprintf(pg_error_msg, sizeof(pg_error_msg), "Already in transaction");
 		return -1;
 	}
 
-	pg_embedded_free_result(result);
+	PG_TRY();
+	{
+		StartTransactionCommand();
+	}
+	PG_CATCH();
+	{
+		ErrorData  *edata;
+
+		edata = CopyErrorData();
+		FlushErrorState();
+		snprintf(pg_error_msg, sizeof(pg_error_msg),
+				 "BEGIN failed: %s", edata->message);
+		FreeErrorData(edata);
+		AbortCurrentTransaction();
+		return -1;
+	}
+	PG_END_TRY();
+
 	return 0;
 }
 
 /*
  * pg_embedded_commit
  *
- * Commit current transaction
+ * Commit current transaction using the C API
  */
 int
 pg_embedded_commit(void)
 {
-	pg_result  *result;
-
 	if (!pg_initialized)
 	{
 		snprintf(pg_error_msg, sizeof(pg_error_msg), "Not initialized");
 		return -1;
 	}
 
-	result = pg_embedded_exec("COMMIT");
-	if (result == NULL || result->status < 0)
+	if (!IsTransactionState())
 	{
-		if (result)
-			pg_embedded_free_result(result);
+		snprintf(pg_error_msg, sizeof(pg_error_msg), "Not in transaction");
 		return -1;
 	}
 
-	pg_embedded_free_result(result);
+	PG_TRY();
+	{
+		CommitTransactionCommand();
+	}
+	PG_CATCH();
+	{
+		ErrorData  *edata;
+
+		edata = CopyErrorData();
+		FlushErrorState();
+		snprintf(pg_error_msg, sizeof(pg_error_msg),
+				 "COMMIT failed: %s", edata->message);
+		FreeErrorData(edata);
+		AbortCurrentTransaction();
+		return -1;
+	}
+	PG_END_TRY();
+
 	return 0;
 }
 
 /*
  * pg_embedded_rollback
  *
- * Rollback current transaction
+ * Rollback current transaction using the C API
  */
 int
 pg_embedded_rollback(void)
 {
-	pg_result  *result;
-
 	if (!pg_initialized)
 	{
-		snprintf(pg_error_msg, sizeof(pg_error_msg), "Not initialized");
+		snprintf(pg_error_msg, sizeof(pg_error_msg), "Not in transaction");
 		return -1;
 	}
 
-	result = pg_embedded_exec("ROLLBACK");
-	if (result == NULL || result->status < 0)
+	if (!IsTransactionState())
 	{
-		if (result)
-			pg_embedded_free_result(result);
+		snprintf(pg_error_msg, sizeof(pg_error_msg), "Not in transaction");
 		return -1;
 	}
 
-	pg_embedded_free_result(result);
+	PG_TRY();
+	{
+		AbortCurrentTransaction();
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+	}
+	PG_END_TRY();
+
 	return 0;
 }
 
@@ -642,11 +707,13 @@ pg_embedded_shutdown(void)
 
 	PG_TRY();
 	{
-		/* Disconnect from SPI */
-		SPI_finish();
-
-		/* Perform normal backend exit */
-		proc_exit(0);
+		/*
+		 * Use shmem_exit(0) instead of proc_exit(0).
+		 * This runs all the internal PostgreSQL cleanup hooks
+		 * (closing WAL, flushing buffers, releasing locks) but does NOT
+		 * call exit() and kill the host application process.
+		 */
+		shmem_exit(0);
 	}
 	PG_CATCH();
 	{
