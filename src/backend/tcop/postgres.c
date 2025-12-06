@@ -1013,7 +1013,7 @@ pg_plan_queries(List *querytrees, const char *query_string, int cursorOptions,
  *
  * Execute a "simple Query" protocol message.
  */
-static void
+void
 exec_simple_query(const char *query_string)
 {
 	CommandDest dest = whereToSendOutput;

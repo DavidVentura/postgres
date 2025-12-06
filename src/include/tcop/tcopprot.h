@@ -70,6 +70,8 @@ extern List *pg_plan_queries(List *querytrees, const char *query_string,
 							 int cursorOptions,
 							 ParamListInfo boundParams);
 
+extern void exec_simple_query(const char *query_string);
+
 extern void die(SIGNAL_ARGS);
 pg_noreturn extern void quickdie(SIGNAL_ARGS);
 extern void StatementCancelHandler(SIGNAL_ARGS);

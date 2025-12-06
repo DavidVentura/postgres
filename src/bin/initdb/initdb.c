@@ -1208,9 +1208,9 @@ test_config_settings(void)
 	else
 		printf("%dkB\n", n_buffers * (BLCKSZ / 1024));
 
-	printf(_("selecting default time zone ... "));
+	printf(_("selecting default time zonex ... "));
 	fflush(stdout);
-	default_timezone = select_default_timezone(share_path);
+	default_timezone = "GMT"; //select_default_timezone(share_path);
 	printf("%s\n", default_timezone ? default_timezone : "GMT");
 }
 
@@ -1988,7 +1988,8 @@ setup_schema(FILE *cmdfd)
 static void
 load_plpgsql(FILE *cmdfd)
 {
-	PG_CMD_PUTS("CREATE EXTENSION plpgsql;\n\n");
+	//PG_CMD_PUTS("CREATE EXTENSION plpgsql;\n\n");
+	//FIXME
 }
 
 /*
@@ -2792,7 +2793,7 @@ setup_data_file_paths(void)
 	set_input(&hba_file, "pg_hba.conf.sample");
 	set_input(&ident_file, "pg_ident.conf.sample");
 	set_input(&conf_file, "postgresql.conf.sample");
-	set_input(&dictionary_file, "snowball_create.sql");
+	//set_input(&dictionary_file, "snowball_create.sql");
 	set_input(&info_schema_file, "information_schema.sql");
 	set_input(&features_file, "sql_features.txt");
 	set_input(&system_constraints_file, "system_constraints.sql");
@@ -2820,7 +2821,7 @@ setup_data_file_paths(void)
 	check_input(hba_file);
 	check_input(ident_file);
 	check_input(conf_file);
-	check_input(dictionary_file);
+	//check_input(dictionary_file);
 	check_input(info_schema_file);
 	check_input(features_file);
 	check_input(system_constraints_file);
@@ -3130,7 +3131,7 @@ initialize_data_directory(void)
 
 	setup_collation(cmdfd);
 
-	setup_run_file(cmdfd, dictionary_file);
+	//setup_run_file(cmdfd, dictionary_file);
 
 	setup_privileges(cmdfd);
 
