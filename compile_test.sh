@@ -37,7 +37,11 @@ musl-gcc -static \
     test_embedded.c \
     embedded_stubs.o \
     "$STATIC_LIB" \
-    -lm -lpthread \
+    -O2 \
+    -s \
+    -fdata-sections \
+    -ffunction-sections \
+    -Wl,--gc-sections \
     -o test_embedded
 
 if [ $? -eq 0 ]; then
