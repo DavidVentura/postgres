@@ -212,6 +212,49 @@ main(int argc, char **argv)
 	print_result(result);
 	pg_embedded_free_result(result);
 
+	/* Test 8: INSERT...RETURNING */
+	printf("----------------------------------------\n");
+	printf("Test 8: INSERT...RETURNING\n");
+	printf("----------------------------------------\n");
+
+	result = pg_embedded_exec(
+							  "INSERT INTO test_embedded (name, value) VALUES "
+							  "('Frank', 600), ('Grace', 700) "
+							  "RETURNING id, name, value");
+	print_result(result);
+	pg_embedded_free_result(result);
+
+	/* Test 9: UPDATE...RETURNING */
+	printf("----------------------------------------\n");
+	printf("Test 9: UPDATE...RETURNING\n");
+	printf("----------------------------------------\n");
+
+	result = pg_embedded_exec(
+							  "UPDATE test_embedded "
+							  "SET value = value + 50 "
+							  "WHERE name IN ('Alice', 'Bob') "
+							  "RETURNING id, name, value");
+	print_result(result);
+	pg_embedded_free_result(result);
+
+	/* Test 10: DELETE...RETURNING */
+	printf("----------------------------------------\n");
+	printf("Test 10: DELETE...RETURNING\n");
+	printf("----------------------------------------\n");
+
+	result = pg_embedded_exec(
+							  "DELETE FROM test_embedded "
+							  "WHERE value > 500 "
+							  "RETURNING id, name, value");
+	print_result(result);
+	pg_embedded_free_result(result);
+
+	/* Verify remaining data */
+	printf("Verify remaining data after DELETE:\n");
+	result = pg_embedded_exec("SELECT id, name, value FROM test_embedded ORDER BY id");
+	print_result(result);
+	pg_embedded_free_result(result);
+
 	/* Cleanup */
 	printf("----------------------------------------\n");
 	printf("Cleanup\n");
