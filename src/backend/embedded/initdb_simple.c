@@ -21,17 +21,23 @@
 #include <unistd.h>
 
 #include "bootstrap/bootstrap.h"
+#include "commands/dbcommands.h"
 #include "common/file_perm.h"
 #include "common/restricted_token.h"
 #include "common/username.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
+#include "nodes/parsenodes.h"
+#include "parser/parse_node.h"
 #include "postmaster/postmaster.h"
 #include "storage/ipc.h"
 #include "storage/pg_shmem.h"
 #include "storage/proc.h"
 #include "tcop/tcopprot.h"
+#include "utils/builtins.h"
 #include "utils/memutils.h"
+#include "access/xact.h"
 
 #include "initdb_embedded.h"
 #include "pgembedded.h"
@@ -126,6 +132,134 @@ create_subdirectories(void)
 			exit(1);
 		}
 	}
+}
+
+/*
+ * create_database_direct
+ *
+ * Create a database using the C API instead of SQL to avoid
+ * "CREATE DATABASE cannot be executed from a function" error
+ */
+static int
+create_database_direct(const char *dbname, Oid dboid, bool is_template,
+					   bool allow_connections, const char *comment)
+{
+	CreatedbStmt *stmt;
+	ParseState *pstate;
+	DefElem    *downer;
+	DefElem    *dtemplate;
+	DefElem    *dtype;
+	DefElem    *dcollate;
+	DefElem    *dctype;
+	DefElem    *distemplate;
+	DefElem    *dallowconn;
+	DefElem    *dconnlimit;
+	DefElem    *doid;
+	DefElem    *dstrategy;
+	List       *options = NIL;
+	MemoryContext oldcontext;
+	char       *dbname_copy;
+	char       *comment_copy = NULL;
+
+	/*
+	 * Copy string parameters to CurrentMemoryContext FIRST,
+	 * before they get corrupted by palloc operations
+	 */
+	oldcontext = MemoryContextSwitchTo(CurrentMemoryContext);
+	dbname_copy = pstrdup(dbname);
+	if (comment)
+		comment_copy = pstrdup(comment);
+	MemoryContextSwitchTo(oldcontext);
+
+	/* Build options list */
+	downer = makeDefElem("owner", (Node *) makeString(username_g), -1);
+	options = lappend(options, downer);
+
+	dtemplate = makeDefElem("template", (Node *) makeString("template1"), -1);
+	options = lappend(options, dtemplate);
+
+	/* Don't specify encoding - it will be inherited from template1 */
+
+	dtype = makeDefElem("locale_provider", (Node *) makeString("libc"), -1);
+	options = lappend(options, dtype);
+
+	dcollate = makeDefElem("lc_collate", (Node *) makeString(locale_g), -1);
+	options = lappend(options, dcollate);
+
+	dctype = makeDefElem("lc_ctype", (Node *) makeString(locale_g), -1);
+	options = lappend(options, dctype);
+
+	if (is_template)
+	{
+		distemplate = makeDefElem("is_template", (Node *) makeBoolean(true), -1);
+		options = lappend(options, distemplate);
+	}
+
+	if (!allow_connections)
+	{
+		dallowconn = makeDefElem("allow_connections", (Node *) makeBoolean(false), -1);
+		options = lappend(options, dallowconn);
+	}
+
+	dconnlimit = makeDefElem("connection_limit", (Node *) makeInteger(-1), -1);
+	options = lappend(options, dconnlimit);
+
+	if (dboid != InvalidOid)
+	{
+		doid = makeDefElem("oid", (Node *) makeInteger(dboid), -1);
+		options = lappend(options, doid);
+	}
+
+	/* Use file_copy strategy for faster creation */
+	dstrategy = makeDefElem("strategy", (Node *) makeString("file_copy"), -1);
+	options = lappend(options, dstrategy);
+
+	/* Create the statement */
+	stmt = makeNode(CreatedbStmt);
+	stmt->dbname = dbname_copy;
+	stmt->options = options;
+
+	/* Create a parse state */
+	pstate = make_parsestate(NULL);
+
+	/* Start a transaction - createdb needs one */
+	StartTransactionCommand();
+
+	/* Call createdb */
+	PG_TRY();
+	{
+		createdb(pstate, stmt);
+
+		/* Commit the transaction */
+		CommitTransactionCommand();
+
+		/* Add comment if requested */
+		if (comment_copy)
+		{
+			char *sql = psprintf("COMMENT ON DATABASE %s IS '%s';",
+								 dbname_copy, comment_copy);
+			pg_result *result = pg_embedded_exec(sql);
+			if (result)
+				pg_embedded_free_result(result);
+		}
+	}
+	PG_CATCH();
+	{
+		ErrorData  *edata;
+
+		edata = CopyErrorData();
+		FlushErrorState();
+		fprintf(stderr, "\nERROR: Failed to create database %s: %s\n",
+				dbname_copy, edata->message);
+		FreeErrorData(edata);
+
+		/* Abort the transaction on error */
+		AbortCurrentTransaction();
+		return -1;
+	}
+	PG_END_TRY();
+
+	return 0;
 }
 
 /*
@@ -564,63 +698,28 @@ pg_embedded_initdb_main(const char *data_dir,
 		printf("\n[DEBUG] Creating template0 and postgres databases\n");
 		fflush(stdout);
 
-		/* Create template0 database */
+		/* Create template0 database using C API */
+		printf("\n[DEBUG] Creating template0 database...\n");
+		fflush(stdout);
+		if (create_database_direct("template0", 4, true, false, "unmodifiable empty database") != 0)
 		{
-			const char *create_template0_sql =
-				"CREATE DATABASE template0 IS_TEMPLATE = true ALLOW_CONNECTIONS = false "
-				"OID = 4 STRATEGY = file_copy;";
-
-			printf("\n[DEBUG] About to execute: %s\n", create_template0_sql);
-			fflush(stdout);
-
-			pg_result *result = pg_embedded_exec(create_template0_sql);
-
-			printf("\n[DEBUG] CREATE DATABASE template0 returned, status=%d\n",
-				   result ? result->status : -999);
-			fflush(stdout);
-
-			if (!result || result->status < 0)
-			{
-				fprintf(stderr, "\nERROR: Failed to create template0: %s\n",
-						pg_embedded_error_message());
-				pg_embedded_shutdown();
-				return -1;
-			}
-			pg_embedded_free_result(result);
-			printf("\n[DEBUG] template0 created successfully\n");
-			fflush(stdout);
+			pg_embedded_shutdown();
+			return -1;
 		}
+		printf("[DEBUG] template0 created successfully\n");
+		fflush(stdout);
 
-		/* Create postgres database */
+		/* Create postgres database using C API */
+		printf("[DEBUG] Creating postgres database...\n");
+		fflush(stdout);
+		if (create_database_direct("postgres", 5, false, true,
+								   "default administrative connection database") != 0)
 		{
-			const char *create_postgres_sql =
-				"CREATE DATABASE postgres OID = 5 STRATEGY = file_copy;";
-			pg_result *result = pg_embedded_exec(create_postgres_sql);
-			if (!result || result->status < 0)
-			{
-				fprintf(stderr, "\nERROR: Failed to create postgres database: %s\n",
-						pg_embedded_error_message());
-				pg_embedded_shutdown();
-				return -1;
-			}
-			pg_embedded_free_result(result);
+			pg_embedded_shutdown();
+			return -1;
 		}
-
-		/* Add comment to postgres database */
-		{
-			const char *comment_sql =
-				"COMMENT ON DATABASE postgres IS 'default administrative connection database';";
-			pg_result *result = pg_embedded_exec(comment_sql);
-			if (!result || result->status < 0)
-			{
-				fprintf(stderr, "\nWARNING: Failed to add comment to postgres database: %s\n",
-						pg_embedded_error_message());
-			}
-			else
-			{
-				pg_embedded_free_result(result);
-			}
-		}
+		printf("[DEBUG] postgres created successfully\n");
+		fflush(stdout);
 
 		/* Shutdown embedded mode */
 		pg_embedded_shutdown();

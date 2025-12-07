@@ -65,7 +65,8 @@ ifneq ($(PORTNAME), cygwin)
 ifneq ($(PORTNAME), win32)
 
 postgres: $(OBJS)
-	$(CC) $(CFLAGS) $(call expand_subsys,$^) $(LDFLAGS) $(LIBS) -o $@
+	# $(CC) $(CFLAGS) $(call expand_subsys,$^) $(LDFLAGS) $(LIBS) -o $@
+	echo skipping postgres
 
 endif
 endif

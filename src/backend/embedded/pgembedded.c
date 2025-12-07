@@ -26,6 +26,7 @@
 #include "access/xlog.h"
 #include "executor/spi.h"
 #include "libpq/libpq.h"
+#include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "postmaster/postmaster.h"
 #include "storage/ipc.h"
@@ -130,6 +131,19 @@ pg_embedded_init_internal(const char *data_dir, const char *dbname,
 
 		/* Initialize as standalone backend */
 		InitStandaloneProcess(progname);
+
+		/*
+		 * Set up signal handlers for standalone mode.
+		 * This is critical - without these, checkpoints and other operations
+		 * that try to use signals will corrupt the stack.
+		 */
+		pqsignal(SIGHUP, SIG_IGN);  /* ignore config reload in embedded mode */
+		pqsignal(SIGINT, SIG_IGN);   /* ignore interrupts in embedded mode */
+		pqsignal(SIGTERM, SIG_IGN);  /* ignore term signals */
+		pqsignal(SIGQUIT, SIG_IGN);  /* ignore quit */
+		pqsignal(SIGPIPE, SIG_IGN);  /* ignore broken pipe */
+		pqsignal(SIGUSR1, SIG_IGN);  /* ignore SIGUSR1 (used for checkpoints in multi-user mode) */
+		pqsignal(SIGUSR2, SIG_IGN);  /* ignore SIGUSR2 */
 
 		/* Initialize configuration */
 		InitializeGUCOptions();

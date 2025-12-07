@@ -28,9 +28,6 @@ musl-gcc -static \
     "$STATIC_LIB" \
     -g \
     -O0 \
-    -fdata-sections \
-    -ffunction-sections \
-    -Wl,--gc-sections \
     -o test_initdb
 
 if [ $? -eq 0 ]; then
