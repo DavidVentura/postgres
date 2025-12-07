@@ -482,8 +482,12 @@ pg_embedded_initdb_main(const char *data_dir,
 		/* Set PGDATA environment variable for pg_embedded_init */
 		setenv("PGDATA", pg_data, 1);
 
-		/* Initialize embedded mode on template1 */
-		if (pg_embedded_init(pg_data, "template1", username_g) != 0)
+		/*
+		 * Initialize embedded mode on template1 with system table mods enabled.
+		 * This is required to run the post-bootstrap SQL scripts that modify
+		 * system catalogs (pg_proc, pg_type, etc.)
+		 */
+		if (pg_embedded_init_with_system_mods(pg_data, "template1", username_g) != 0)
 		{
 			fprintf(stderr, "\nERROR: Failed to initialize embedded mode: %s\n",
 					pg_embedded_error_message());
@@ -553,6 +557,71 @@ pg_embedded_initdb_main(const char *data_dir,
 			free(sql_content);
 		}
 
+		/*
+		 * Create template0 and postgres databases
+		 * Do this BEFORE shutting down, while we're still connected
+		 */
+		printf("\n[DEBUG] Creating template0 and postgres databases\n");
+		fflush(stdout);
+
+		/* Create template0 database */
+		{
+			const char *create_template0_sql =
+				"CREATE DATABASE template0 IS_TEMPLATE = true ALLOW_CONNECTIONS = false "
+				"OID = 4 STRATEGY = file_copy;";
+
+			printf("\n[DEBUG] About to execute: %s\n", create_template0_sql);
+			fflush(stdout);
+
+			pg_result *result = pg_embedded_exec(create_template0_sql);
+
+			printf("\n[DEBUG] CREATE DATABASE template0 returned, status=%d\n",
+				   result ? result->status : -999);
+			fflush(stdout);
+
+			if (!result || result->status < 0)
+			{
+				fprintf(stderr, "\nERROR: Failed to create template0: %s\n",
+						pg_embedded_error_message());
+				pg_embedded_shutdown();
+				return -1;
+			}
+			pg_embedded_free_result(result);
+			printf("\n[DEBUG] template0 created successfully\n");
+			fflush(stdout);
+		}
+
+		/* Create postgres database */
+		{
+			const char *create_postgres_sql =
+				"CREATE DATABASE postgres OID = 5 STRATEGY = file_copy;";
+			pg_result *result = pg_embedded_exec(create_postgres_sql);
+			if (!result || result->status < 0)
+			{
+				fprintf(stderr, "\nERROR: Failed to create postgres database: %s\n",
+						pg_embedded_error_message());
+				pg_embedded_shutdown();
+				return -1;
+			}
+			pg_embedded_free_result(result);
+		}
+
+		/* Add comment to postgres database */
+		{
+			const char *comment_sql =
+				"COMMENT ON DATABASE postgres IS 'default administrative connection database';";
+			pg_result *result = pg_embedded_exec(comment_sql);
+			if (!result || result->status < 0)
+			{
+				fprintf(stderr, "\nWARNING: Failed to add comment to postgres database: %s\n",
+						pg_embedded_error_message());
+			}
+			else
+			{
+				pg_embedded_free_result(result);
+			}
+		}
+
 		/* Shutdown embedded mode */
 		pg_embedded_shutdown();
 	}
@@ -561,6 +630,7 @@ pg_embedded_initdb_main(const char *data_dir,
 
 	printf("\nDatabase cluster initialized successfully!\n");
 	printf("Location: %s\n", pg_data);
+	printf("\nYou can now connect to the 'postgres' database.\n");
 
 	return 0;
 }

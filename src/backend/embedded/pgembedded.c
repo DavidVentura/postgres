@@ -75,12 +75,14 @@ pg_embedded_initdb(const char *data_dir, const char *username,
 }
 
 /*
- * pg_embedded_init
+ * pg_embedded_init_internal
  *
  * Initialize PostgreSQL in single-user embedded mode
+ * If allow_system_table_mods is true, enables modification of system catalogs
  */
-int
-pg_embedded_init(const char *data_dir, const char *dbname, const char *username)
+static int
+pg_embedded_init_internal(const char *data_dir, const char *dbname,
+						  const char *username, bool allow_system_table_mods)
 {
 	if (pg_initialized)
 	{
@@ -131,6 +133,13 @@ pg_embedded_init(const char *data_dir, const char *dbname, const char *username)
 
 		/* Initialize configuration */
 		InitializeGUCOptions();
+
+		/*
+		 * Enable system table modifications if requested (needed for initdb).
+		 * This must be set before SelectConfigFiles() is called.
+		 */
+		if (allow_system_table_mods)
+			SetConfigOption("allow_system_table_mods", "true", PGC_POSTMASTER, PGC_S_ARGV);
 
 		/* Load configuration files */
 		SelectConfigFiles(NULL, username);
@@ -265,6 +274,28 @@ pg_embedded_init(const char *data_dir, const char *dbname, const char *username)
 	PG_END_TRY();
 
 	return 0;
+}
+
+/*
+ * pg_embedded_init
+ *
+ * Public wrapper for normal use (no system table mods)
+ */
+int
+pg_embedded_init(const char *data_dir, const char *dbname, const char *username)
+{
+	return pg_embedded_init_internal(data_dir, dbname, username, false);
+}
+
+/*
+ * pg_embedded_init_with_system_mods
+ *
+ * Initialize with system table modifications enabled (for initdb)
+ */
+int
+pg_embedded_init_with_system_mods(const char *data_dir, const char *dbname, const char *username)
+{
+	return pg_embedded_init_internal(data_dir, dbname, username, true);
 }
 
 /*
@@ -442,21 +473,21 @@ pg_embedded_exec(const char *query)
 	{
 		ErrorData  *edata;
 
-		/* Get error data */
+		/* Get error data and copy message before aborting */
 		edata = CopyErrorData();
 		FlushErrorState();
 
 		snprintf(pg_error_msg, sizeof(pg_error_msg),
 				 "Query failed: %s", edata->message);
 
-		FreeErrorData(edata);
-
 		/*
-		 * Abort the current transaction to release locks and clean up
-		 * resources. This is safe whether we started the transaction
-		 * implicitly or it was started explicitly.
+		 * Abort the current transaction BEFORE freeing error data.
+		 * This ensures we don't try to free memory from destroyed contexts.
 		 */
 		AbortCurrentTransaction();
+
+		/* Now it's safe to free - but DON'T call FreeErrorData after abort */
+		/* The memory will be cleaned up by the memory context reset */
 
 		/* Clean up and return partial result with error */
 		result->status = -1;

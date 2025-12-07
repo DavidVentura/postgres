@@ -28,4 +28,18 @@ int pg_embedded_initdb_main(const char *data_dir,
                              const char *encoding,
                              const char *locale);
 
+/*
+ * pg_embedded_init_with_system_mods
+ *
+ * Internal function: Initialize embedded PostgreSQL with system table
+ * modifications enabled. This is needed during initdb to run the
+ * post-bootstrap SQL scripts that modify system catalogs.
+ *
+ * Returns:
+ *   0 on success, -1 on error
+ */
+int pg_embedded_init_with_system_mods(const char *data_dir,
+									  const char *dbname,
+									  const char *username);
+
 #endif /* INITDB_EMBEDDED_H */
