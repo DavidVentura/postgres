@@ -255,6 +255,30 @@ main(int argc, char **argv)
 	print_result(result);
 	pg_embedded_free_result(result);
 
+	/* Test 11: ALTER TABLE on non-existent table (should fail) */
+	printf("----------------------------------------\n");
+	printf("Test 11: ALTER TABLE on non-existent table\n");
+	printf("----------------------------------------\n");
+	printf("Attempting to ALTER a table that doesn't exist...\n");
+	result = pg_embedded_exec("ALTER TABLE nonexistent_table ADD COLUMN new_col INTEGER");
+	if (result)
+	{
+		if (result->status < 0)
+		{
+			printf("Expected error occurred: %s\n", pg_embedded_error_message());
+		}
+		else
+		{
+			printf("Unexpected success!\n");
+		}
+		print_result(result);
+		pg_embedded_free_result(result);
+	}
+	else
+	{
+		printf("Result was NULL - Error: %s\n", pg_embedded_error_message());
+	}
+
 	/* Cleanup */
 	printf("----------------------------------------\n");
 	printf("Cleanup\n");
