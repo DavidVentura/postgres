@@ -26,7 +26,8 @@ musl-gcc -static \
     test_initdb.c \
     embedded_stubs.o \
     "$STATIC_LIB" \
-    -O2 \
+    -g \
+    -O0 \
     -fdata-sections \
     -ffunction-sections \
     -Wl,--gc-sections \

@@ -25,6 +25,10 @@ echo "---------------------------------------------------------------------"
 musl-gcc -static \
     -I "$POSTGRES_ROOT/src/include" \
     -c embedded_stubs.c \
+    -O2 \
+    -fdata-sections \
+    -ffunction-sections \
+    -Wl,--gc-sections \
     -o embedded_stubs.o
 
 echo ""
@@ -38,7 +42,8 @@ musl-gcc -static \
     embedded_stubs.o \
     "$STATIC_LIB" \
     -O2 \
-    -s \
+    -fvisibility=hidden \
+    -fno-asynchronous-unwind-tables \
     -fdata-sections \
     -ffunction-sections \
     -Wl,--gc-sections \

@@ -6,7 +6,7 @@ set -e  # Exit on error
 echo "Configuring PostgreSQL for static library build with musl..."
 
 CC=musl-gcc \
-CFLAGS="-O2 -static" \
+CFLAGS="-O2 -static -ffunction-sections -fdata-sections" \
 LDFLAGS="-static" \
 ./configure \
   --prefix=/tmp/pg-embedded-install \
@@ -20,8 +20,8 @@ LDFLAGS="-static" \
   --without-systemd \
   --without-llvm \
   --disable-largefile \
-  --disable-spinlocks \
-  --enable-debug
+  --disable-spinlocks
+  #--enable-debug
 
 echo ""
 echo "Configuration complete! Verifying settings..."
