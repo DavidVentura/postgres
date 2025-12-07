@@ -200,15 +200,15 @@ InitStandaloneProcess(const char *argv0)
 	sigprocmask(SIG_SETMASK, &BlockSig, NULL);
 
 	/* Compute paths, no postmaster to inherit from */
-	if (my_exec_path[0] == '\0')
-	{
-		if (find_my_exec(argv0, my_exec_path) < 0)
-			elog(FATAL, "%s: could not locate my own executable path",
-				 argv0);
-	}
+	//if (my_exec_path[0] == '\0')
+	//{
+	//	if (find_my_exec(argv0, my_exec_path) < 0)
+	//		elog(FATAL, "%s: could not locate my own executable path",
+	//			 argv0);
+	//}
 
-	if (pkglib_path[0] == '\0')
-		get_pkglib_path(my_exec_path, pkglib_path);
+	//if (pkglib_path[0] == '\0')
+	//	get_pkglib_path(my_exec_path, pkglib_path);
 }
 
 void

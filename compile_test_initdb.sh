@@ -4,7 +4,7 @@
 set -e
 
 echo "====================================================================="
-echo "Compiling Embedded PostgreSQL initdb Test Application"
+echo "Compiling test_initdb (In-Process Database Initialization Test)"
 echo "====================================================================="
 echo ""
 
@@ -13,11 +13,11 @@ STATIC_LIB="$POSTGRES_ROOT/src/backend/libpostgres_server.a"
 
 if [ ! -f "$STATIC_LIB" ]; then
     echo "ERROR: Static library not found at $STATIC_LIB"
-    echo "Please run: ./create_static_lib.sh"
+    echo "Please run: ./build.sh"
     exit 1
 fi
 
-echo "Step 1: Compiling test_initdb.c..."
+echo "Compiling test_initdb.c..."
 echo "---------------------------------------------------------------------"
 
 musl-gcc -static \
@@ -26,7 +26,10 @@ musl-gcc -static \
     test_initdb.c \
     embedded_stubs.o \
     "$STATIC_LIB" \
-    -lm -lpthread \
+    -O2 \
+    -fdata-sections \
+    -ffunction-sections \
+    -Wl,--gc-sections \
     -o test_initdb
 
 if [ $? -eq 0 ]; then
@@ -41,7 +44,11 @@ if [ $? -eq 0 ]; then
     echo "  ./test_initdb <data_directory>"
     echo ""
     echo "Example:"
-    echo "  ./test_initdb /tmp/pgdata_embedded"
+    echo "  # Create a new database cluster:"
+    echo "  ./test_initdb /tmp/pgdata_new"
+    echo ""
+    echo "  # Then use it with test_embedded:"
+    echo "  ./test_embedded /tmp/pgdata_new"
     echo ""
 else
     echo ""

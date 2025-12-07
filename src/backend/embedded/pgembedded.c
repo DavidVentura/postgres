@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "pgembedded.h"
+#include "initdb_embedded.h"
 
 #include "access/xact.h"
 #include "access/xlog.h"
@@ -43,30 +44,15 @@ static char pg_error_msg[1024] = {0};
 /*
  * pg_embedded_initdb
  *
- * Initialize a new PostgreSQL data directory by calling BootstrapModeMain
- * directly. This creates the system catalogs and template databases.
- *
- * NOTE: This is a complex operation that normally requires the postgres.bki
- * file and other share files. For simplicity, this implementation calls
- * the system initdb command if available, or provides instructions.
+ * Initialize a new PostgreSQL data directory in-process.
+ * This creates the system catalogs and template databases without
+ * forking external processes.
  */
 int
 pg_embedded_initdb(const char *data_dir, const char *username,
 				   const char *encoding, const char *locale)
 {
-	char		cmd[2048];
-	int			ret;
-	const char *initdb_paths[] = {
-		"/usr/lib/postgresql/17/bin/initdb",
-		"/usr/lib/postgresql/16/bin/initdb",
-		"/usr/lib/postgresql/15/bin/initdb",
-		"/usr/local/bin/initdb",
-		"/usr/bin/initdb",
-		"initdb",					/* Try PATH */
-		NULL
-	};
-	int			i;
-	bool		found = false;
+	int ret;
 
 	if (!data_dir || !username)
 	{
@@ -75,57 +61,16 @@ pg_embedded_initdb(const char *data_dir, const char *username,
 		return -1;
 	}
 
-	/*
-	 * Try to find a compatible initdb. We look in common PostgreSQL
-	 * installation paths.
-	 */
-	for (i = 0; initdb_paths[i] != NULL; i++)
-	{
-		snprintf(cmd, sizeof(cmd),
-				 "%s --version > /dev/null 2>&1",
-				 initdb_paths[i]);
-
-		if (system(cmd) == 0)
-		{
-			found = true;
-			break;
-		}
-	}
-
-	if (!found)
-	{
-		snprintf(pg_error_msg, sizeof(pg_error_msg),
-				 "Could not find initdb command. Please install PostgreSQL or "
-				 "create the data directory manually with: "
-				 "initdb -D %s -U %s -A trust",
-				 data_dir, username);
-		return -1;
-	}
-
-	/* Build and run initdb command */
-	snprintf(cmd, sizeof(cmd),
-			 "%s -D \"%s\" -U \"%s\" %s%s %s%s -A trust 2>&1",
-			 initdb_paths[i],
-			 data_dir,
-			 username,
-			 encoding ? "-E " : "",
-			 encoding ? encoding : "",
-			 locale ? "--locale=" : "",
-			 locale ? locale : "");
-
-	fprintf(stderr, "Initializing database: %s\n", cmd);
-
-	ret = system(cmd);
+	/* Call the in-process initdb implementation */
+	ret = pg_embedded_initdb_main(data_dir, username, encoding, locale);
 
 	if (ret != 0)
 	{
 		snprintf(pg_error_msg, sizeof(pg_error_msg),
-				 "initdb command failed with exit code %d",
-				 ret);
+				 "initdb failed");
 		return -1;
 	}
 
-	fprintf(stderr, "Database initialized successfully\n");
 	return 0;
 }
 

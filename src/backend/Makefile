@@ -81,7 +81,10 @@ libpostgres_server.a: $(filter-out main/objfiles.txt,$(SUBDIROBJS)) $(top_buildd
 	@mkdir -p .tmp_common && cd .tmp_common && $(AR) x ../$(top_builddir)/src/common/libpgcommon_srv.a && $(AR) $(AROPT) ../$@ *.o && cd .. && rm -rf .tmp_common
 	@echo "Extracting objects from libpgport_srv.a..."
 	@mkdir -p .tmp_port && cd .tmp_port && $(AR) x ../$(top_builddir)/src/port/libpgport_srv.a && $(AR) $(AROPT) ../$@ *.o && cd .. && rm -rf .tmp_port
-	$(RANLIB) $@
+	@echo "Adding timezone objects..."
+	$(AR) $(AROPT) $@ $(top_builddir)/src/timezone/localtime.o $(top_builddir)/src/timezone/pgtz.o $(top_builddir)/src/timezone/strftime.o
+	@echo "Running ranlib..."
+	ranlib $@
 	@echo "Library $@ created successfully"
 	@echo "Object count: $$($(AR) t $@ | wc -l)"
 
