@@ -17,6 +17,7 @@
 #include <getopt.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "bootstrap/bootstrap.h"
@@ -26,10 +27,14 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "postmaster/postmaster.h"
+#include "storage/ipc.h"
+#include "storage/pg_shmem.h"
+#include "storage/proc.h"
 #include "tcop/tcopprot.h"
 #include "utils/memutils.h"
 
 #include "initdb_embedded.h"
+#include "pgembedded.h"
 
 /* Global variables (simplified from initdb.c) */
 static char *pg_data = NULL;
@@ -239,6 +244,7 @@ pg_embedded_initdb_main(const char *data_dir,
 	printf("writing version file ... ");
 	fflush(stdout);
 	write_version_file(NULL);
+	write_version_file("base/1");  /* Also in template1 directory */
     write_empty_config_file(NULL);
 	printf("ok\n");
 
@@ -255,20 +261,22 @@ pg_embedded_initdb_main(const char *data_dir,
 
 	/*
 	 * Bootstrap template1 database
-	 * This is the core phase that creates the system catalogs
+	 * Fork a child process to run bootstrap, then wait for it to complete
 	 */
 	printf("running bootstrap script ... ");
 	fflush(stdout);
 
 	{
-		/* For now, just create a minimal bootstrap setup */
+		pid_t bootstrap_pid;
+		int status;
+
+		/* Prepare BKI file with token substitution */
 		char *boot_argv[10];
 		int boot_argc = 0;
 		FILE *bki_src, *bki_dest;
 		char line[8192];
 		const char *bki_src_path = "src/include/catalog/postgres.bki";
 		const char *bki_temp_path = "/tmp/pg_bootstrap.bki";
-		int saved_stdin;
 
 		/* Copy BKI file with token substitution */
 		bki_src = fopen(bki_src_path, "r");
@@ -363,14 +371,6 @@ pg_embedded_initdb_main(const char *data_dir,
 		fclose(bki_src);
 		fclose(bki_dest);
 
-		/* Redirect stdin to BKI file */
-		saved_stdin = dup(STDIN_FILENO);
-		if (freopen(bki_temp_path, "r", stdin) == NULL)
-		{
-			fprintf(stderr, "\nERROR: could not freopen stdin: %s\n", strerror(errno));
-			exit(1);
-		}
-
 		/* Build bootstrap argv */
 		boot_argv[boot_argc++] = strdup("postgres");
 		boot_argv[boot_argc++] = strdup("--boot");
@@ -382,31 +382,64 @@ pg_embedded_initdb_main(const char *data_dir,
 		boot_argv[boot_argc++] = strdup("1048576");  /* 1MB WAL segments */
 		boot_argv[boot_argc] = NULL;
 
-		printf("\n[DEBUG] Calling BootstrapModeMain with argc=%d\n", boot_argc);
+		/* Fork child process for bootstrap */
+		bootstrap_pid = fork();
+		if (bootstrap_pid < 0)
+		{
+			fprintf(stderr, "\nERROR: fork failed: %s\n", strerror(errno));
+			exit(1);
+		}
+
+		if (bootstrap_pid == 0)
+		{
+			/* Child process - run bootstrap */
+			int saved_stdin;
+
+			/* Redirect stdin to BKI file */
+			saved_stdin = dup(STDIN_FILENO);
+			if (freopen(bki_temp_path, "r", stdin) == NULL)
+			{
+				fprintf(stderr, "\nERROR: could not freopen stdin: %s\n", strerror(errno));
+				exit(1);
+			}
+
+			/*
+			 * Initialize essential subsystems that main.c normally does
+			 * before calling BootstrapModeMain
+			 */
+			MyProcPid = getpid();
+			MemoryContextInit();
+
+			/* Reset getopt state */
+			optind = 1;
+			opterr = 1;
+			optopt = 0;
+
+			/* Call BootstrapModeMain - this will exit the child process */
+			BootstrapModeMain(boot_argc, boot_argv, false);
+
+			/* Should not reach here */
+			exit(0);
+		}
+
+		/* Parent process - wait for bootstrap to complete */
+		printf("\n[DEBUG] Waiting for bootstrap child process %d\n", bootstrap_pid);
 		fflush(stdout);
 
-		/*
-		 * Initialize essential subsystems that main.c normally does
-		 * before calling BootstrapModeMain
-		 */
-		MyProcPid = getpid();
-		MemoryContextInit();
+		if (waitpid(bootstrap_pid, &status, 0) < 0)
+		{
+			fprintf(stderr, "\nERROR: waitpid failed: %s\n", strerror(errno));
+			exit(1);
+		}
 
-		/* Reset getopt state */
-		optind = 1;
-		opterr = 1;
-		optopt = 0;
+		if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+		{
+			fprintf(stderr, "\nERROR: bootstrap process failed with status %d\n", status);
+			exit(1);
+		}
 
-		/* Call BootstrapModeMain */
-		BootstrapModeMain(boot_argc, boot_argv, false);
-
-		printf("\n[DEBUG] BootstrapModeMain returned\n");
+		printf("\n[DEBUG] Bootstrap completed successfully\n");
 		fflush(stdout);
-
-		/* Restore stdin */
-		fclose(stdin);
-		dup2(saved_stdin, STDIN_FILENO);
-		close(saved_stdin);
 
 		/* Clean up */
 		unlink(bki_temp_path);
@@ -414,10 +447,120 @@ pg_embedded_initdb_main(const char *data_dir,
 
 	printf("ok\n");
 
-	printf("\nBootstrap phase completed successfully!\n");
-	printf("Database cluster initialized at %s\n", pg_data);
-	printf("\nNote: Post-bootstrap SQL not yet implemented.\n");
-	printf("The database has system catalogs but no template1 database yet.\n");
+	/*
+	 * Post-bootstrap: Run SQL setup scripts
+	 * Use our embedded API to run SQL without forking
+	 */
+	printf("running post-bootstrap initialization ... ");
+	fflush(stdout);
+
+	{
+		char sql_file_paths[4][MAXPGPATH];
+		const char *sql_files[5];
+		char cwd[MAXPGPATH];
+		int i;
+
+		/* Get current working directory and build absolute paths BEFORE pg_embedded_init
+		 * because pg_embedded_init will chdir to the data directory */
+		if (getcwd(cwd, sizeof(cwd)) == NULL)
+		{
+			fprintf(stderr, "\nERROR: getcwd failed: %s\n", strerror(errno));
+			return -1;
+		}
+
+		snprintf(sql_file_paths[0], MAXPGPATH, "%s/src/include/catalog/system_constraints.sql", cwd);
+		snprintf(sql_file_paths[1], MAXPGPATH, "%s/src/backend/catalog/system_functions.sql", cwd);
+		snprintf(sql_file_paths[2], MAXPGPATH, "%s/src/backend/catalog/system_views.sql", cwd);
+		snprintf(sql_file_paths[3], MAXPGPATH, "%s/src/backend/catalog/information_schema.sql", cwd);
+
+		sql_files[0] = sql_file_paths[0];
+		sql_files[1] = sql_file_paths[1];
+		sql_files[2] = sql_file_paths[2];
+		sql_files[3] = sql_file_paths[3];
+		sql_files[4] = NULL;
+
+		/* Set PGDATA environment variable for pg_embedded_init */
+		setenv("PGDATA", pg_data, 1);
+
+		/* Initialize embedded mode on template1 */
+		if (pg_embedded_init(pg_data, "template1", username_g) != 0)
+		{
+			fprintf(stderr, "\nERROR: Failed to initialize embedded mode: %s\n",
+					pg_embedded_error_message());
+			return -1;
+		}
+
+		/* Run each SQL file */
+		for (i = 0; sql_files[i] != NULL; i++)
+		{
+			FILE *sql_file;
+			char *sql_content = NULL;
+			long file_size;
+			size_t bytes_read;
+
+			printf("\n[DEBUG] Running %s\n", sql_files[i]);
+			fflush(stdout);
+
+			/* Read entire SQL file into memory */
+			sql_file = fopen(sql_files[i], "r");
+			if (!sql_file)
+			{
+				fprintf(stderr, "\nWARNING: could not open %s: %s\n",
+						sql_files[i], strerror(errno));
+				continue;
+			}
+
+			/* Get file size */
+			fseek(sql_file, 0, SEEK_END);
+			file_size = ftell(sql_file);
+			fseek(sql_file, 0, SEEK_SET);
+
+			/* Allocate buffer */
+			sql_content = malloc(file_size + 1);
+			if (!sql_content)
+			{
+				fprintf(stderr, "\nERROR: Out of memory\n");
+				fclose(sql_file);
+				return -1;
+			}
+
+			/* Read file */
+			bytes_read = fread(sql_content, 1, file_size, sql_file);
+			sql_content[bytes_read] = '\0';
+			fclose(sql_file);
+
+			/* Execute SQL */
+			{
+				pg_result *result = pg_embedded_exec(sql_content);
+				if (!result)
+				{
+					fprintf(stderr, "\nERROR: pg_embedded_exec returned NULL for %s: %s\n",
+							sql_files[i], pg_embedded_error_message());
+					free(sql_content);
+					return -1;
+				}
+
+				if (result->status < 0)
+				{
+					fprintf(stderr, "\nWARNING: SQL execution had errors in %s (status=%d): %s\n",
+							sql_files[i], result->status, pg_embedded_error_message());
+					/* Continue anyway - some errors may be expected */
+				}
+
+				pg_embedded_free_result(result);
+			}
+
+			free(sql_content);
+		}
+
+		/* Shutdown embedded mode */
+		pg_embedded_shutdown();
+	}
+
+	printf("ok\n");
+
+	printf("\nDatabase cluster initialized successfully!\n");
+	printf("Location: %s\n", pg_data);
 
 	return 0;
 }
