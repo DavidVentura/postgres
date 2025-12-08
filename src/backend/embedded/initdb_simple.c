@@ -691,35 +691,72 @@ pg_embedded_initdb_main(const char *data_dir,
 			free(sql_content);
 		}
 
-		/*
-		 * Create template0 and postgres databases
-		 * Do this BEFORE shutting down, while we're still connected
-		 */
-		printf("\n[DEBUG] Creating template0 and postgres databases\n");
-		fflush(stdout);
+		/* Shutdown embedded mode - we need to restart without system_table_mods */
+		pg_embedded_shutdown();
+	}
+
+	printf("ok\n");
+
+	/*
+	 * Create template0 and postgres databases
+	 * We do this in a SEPARATE session WITHOUT allow_system_table_mods
+	 * to avoid the databases inheriting that setting
+	 */
+	printf("creating template0 and postgres databases ... ");
+	fflush(stdout);
+
+	{
+		char abs_pg_data[MAXPGPATH];
+
+		/* Get absolute path since we may have changed directory */
+		if (pg_data[0] != '/')
+		{
+			char cwd[MAXPGPATH];
+			if (getcwd(cwd, sizeof(cwd)) == NULL)
+			{
+				fprintf(stderr, "\nERROR: getcwd failed: %s\n", strerror(errno));
+				return -1;
+			}
+			/* Go back to original directory before getting absolute path */
+			if (chdir("..") != 0)
+			{
+				fprintf(stderr, "\nERROR: chdir failed: %s\n", strerror(errno));
+				return -1;
+			}
+			if (getcwd(cwd, sizeof(cwd)) == NULL)
+			{
+				fprintf(stderr, "\nERROR: getcwd failed: %s\n", strerror(errno));
+				return -1;
+			}
+			snprintf(abs_pg_data, sizeof(abs_pg_data), "%s/%s", cwd, pg_data);
+		}
+		else
+		{
+			strlcpy(abs_pg_data, pg_data, sizeof(abs_pg_data));
+		}
+
+		/* Initialize embedded mode WITHOUT system table mods */
+		if (pg_embedded_init(abs_pg_data, "template1", username_g) != 0)
+		{
+			fprintf(stderr, "\nERROR: Failed to re-initialize embedded mode: %s\n",
+					pg_embedded_error_message());
+			return -1;
+		}
 
 		/* Create template0 database using C API */
-		printf("\n[DEBUG] Creating template0 database...\n");
-		fflush(stdout);
 		if (create_database_direct("template0", 4, true, false, "unmodifiable empty database") != 0)
 		{
 			pg_embedded_shutdown();
 			return -1;
 		}
-		printf("[DEBUG] template0 created successfully\n");
-		fflush(stdout);
 
 		/* Create postgres database using C API */
-		printf("[DEBUG] Creating postgres database...\n");
-		fflush(stdout);
 		if (create_database_direct("postgres", 5, false, true,
 								   "default administrative connection database") != 0)
 		{
 			pg_embedded_shutdown();
 			return -1;
 		}
-		printf("[DEBUG] postgres created successfully\n");
-		fflush(stdout);
 
 		/* Shutdown embedded mode */
 		pg_embedded_shutdown();

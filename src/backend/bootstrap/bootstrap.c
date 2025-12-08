@@ -222,8 +222,6 @@ BootstrapModeMain(int argc, char *argv[], bool check_only)
 
 	while ((flag = getopt(argc, argv, "B:c:d:D:Fkr:X:-:")) != -1)
 	{
-		write_stderr("This works.\n");
-
 		switch (flag)
 		{
 			case 'B':

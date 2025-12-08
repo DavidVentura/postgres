@@ -109,6 +109,15 @@ main(int argc, char **argv)
 	print_result(result);
 	pg_embedded_free_result(result);
 
+	/* Check current database */
+	printf("Current database: ");
+	result = pg_embedded_exec("SELECT current_database()");
+	if (result && result->rows > 0)
+	{
+		printf("%s\n\n", result->values[0][0]);
+	}
+	pg_embedded_free_result(result);
+
 	/* Test 2: Create a test table */
 	printf("----------------------------------------\n");
 	printf("Test 2: Create test table\n");
@@ -122,6 +131,11 @@ main(int argc, char **argv)
 							  "  name TEXT NOT NULL,"
 							  "  value INTEGER"
 							  ")");
+	printf("DEBUG: Error message is: '%s'\n", pg_embedded_error_message());
+	if (result && result->status < 0)
+	{
+		fprintf(stderr, "ERROR: CREATE TABLE failed: %s\n", pg_embedded_error_message());
+	}
 	print_result(result);
 	pg_embedded_free_result(result);
 
@@ -134,6 +148,10 @@ main(int argc, char **argv)
 							  "('Alice', 100), "
 							  "('Bob', 200), "
 							  "('Charlie', 300)");
+	if (result && result->status < 0)
+	{
+		fprintf(stderr, "ERROR: %s\n", pg_embedded_error_message());
+	}
 	print_result(result);
 	pg_embedded_free_result(result);
 
@@ -145,6 +163,10 @@ main(int argc, char **argv)
 							  "SELECT id, name, value "
 							  "FROM test_embedded "
 							  "ORDER BY id");
+	if (result && result->status < 0)
+	{
+		fprintf(stderr, "ERROR: %s\n", pg_embedded_error_message());
+	}
 	print_result(result);
 	pg_embedded_free_result(result);
 

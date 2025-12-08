@@ -113,18 +113,17 @@ pg_embedded_init_internal(const char *data_dir, const char *dbname,
 		 * Set up the executable path. For embedded use, we use argv[0] which
 		 * should be set to progname. If my_exec_path hasn't been set yet,
 		 * find it now.
-		 */
 		if (my_exec_path[0] == '\0')
 		{
 			if (find_my_exec(progname, my_exec_path) < 0)
 			{
-				/* If we can't find it, just use progname as a fallback */
 				strlcpy(my_exec_path, progname, MAXPGPATH);
 			}
 		}
 
 		if (pkglib_path[0] == '\0')
 			get_pkglib_path(my_exec_path, pkglib_path);
+		 */
 
 		/* Set data directory */
 		SetDataDir(data_dir);
@@ -153,7 +152,14 @@ pg_embedded_init_internal(const char *data_dir, const char *dbname,
 		 * This must be set before SelectConfigFiles() is called.
 		 */
 		if (allow_system_table_mods)
+		{
+			fprintf(stderr, "[DEBUG] Enabling allow_system_table_mods\n");
 			SetConfigOption("allow_system_table_mods", "true", PGC_POSTMASTER, PGC_S_ARGV);
+		}
+		else
+		{
+			fprintf(stderr, "[DEBUG] NOT enabling allow_system_table_mods\n");
+		}
 
 		/* Load configuration files */
 		SelectConfigFiles(NULL, username);
@@ -231,15 +237,6 @@ pg_embedded_init_internal(const char *data_dir, const char *dbname,
 		/* Connect to specified database */
 		InitPostgres(dbname, InvalidOid, username, InvalidOid, 0, NULL);
 
-		/*
-		 * If the PostmasterContext is still around, recycle the space; we don't
-		 * need it anymore after InitPostgres completes.
-		 */
-		if (PostmasterContext)
-		{
-			MemoryContextDelete(PostmasterContext);
-			PostmasterContext = NULL;
-		}
 
 		/* Set processing mode to normal */
 		SetProcessingMode(NormalProcessing);
@@ -310,6 +307,77 @@ int
 pg_embedded_init_with_system_mods(const char *data_dir, const char *dbname, const char *username)
 {
 	return pg_embedded_init_internal(data_dir, dbname, username, true);
+}
+
+/*
+ * copy_tuptable
+ *
+ * Copy SPI tuple table results into a pg_result structure.
+ * Returns 0 on success, -1 on failure.
+ */
+static int
+copy_tuptable(pg_result *result, SPITupleTable *tuptable)
+{
+	TupleDesc	tupdesc = tuptable->tupdesc;
+	uint64_t	row;
+	int			col;
+
+	result->cols = tupdesc->natts;
+
+	/* Allocate column names array */
+	result->colnames = (char **) malloc(result->cols * sizeof(char *));
+	if (!result->colnames)
+	{
+		snprintf(pg_error_msg, sizeof(pg_error_msg), "Out of memory");
+		return -1;
+	}
+
+	/* Copy column names */
+	for (col = 0; col < result->cols; col++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, col);
+
+		result->colnames[col] = strdup(NameStr(attr->attname));
+	}
+
+	/* Allocate result matrix */
+	result->values = (char ***) malloc(result->rows * sizeof(char **));
+	if (!result->values)
+	{
+		snprintf(pg_error_msg, sizeof(pg_error_msg), "Out of memory");
+		return -1;
+	}
+
+	/* Copy data for each row */
+	for (row = 0; row < result->rows; row++)
+	{
+		HeapTuple	tuple = tuptable->vals[row];
+
+		result->values[row] = (char **) malloc(result->cols * sizeof(char *));
+		if (!result->values[row])
+		{
+			snprintf(pg_error_msg, sizeof(pg_error_msg), "Out of memory");
+			return -1;
+		}
+
+		/* Get each column value */
+		for (col = 0; col < result->cols; col++)
+		{
+			char	   *str;
+
+			str = SPI_getvalue(tuple, tupdesc, col + 1);
+
+			if (str == NULL)
+				result->values[row][col] = NULL;
+			else
+			{
+				result->values[row][col] = strdup(str);
+				pfree(str);
+			}
+		}
+	}
+
+	return 0;
 }
 
 /*
@@ -403,67 +471,10 @@ pg_embedded_exec(const char *query)
 		 */
 		if (ret > 0 && SPI_tuptable != NULL)
 		{
-			SPITupleTable *tuptable = SPI_tuptable;
-			TupleDesc	tupdesc = tuptable->tupdesc;
-			uint64_t	row;
-			int			col;
-
-			result->cols = tupdesc->natts;
-
-			/* Allocate column names array */
-			result->colnames = (char **) malloc(result->cols * sizeof(char *));
-			if (!result->colnames)
+			if (copy_tuptable(result, SPI_tuptable) != 0)
 			{
-				snprintf(pg_error_msg, sizeof(pg_error_msg), "Out of memory");
 				pg_embedded_free_result(result);
 				return NULL;
-			}
-
-			/* Copy column names */
-			for (col = 0; col < result->cols; col++)
-			{
-				Form_pg_attribute attr = TupleDescAttr(tupdesc, col);
-
-				result->colnames[col] = strdup(NameStr(attr->attname));
-			}
-
-			/* Allocate result matrix */
-			result->values = (char ***) malloc(result->rows * sizeof(char **));
-			if (!result->values)
-			{
-				snprintf(pg_error_msg, sizeof(pg_error_msg), "Out of memory");
-				pg_embedded_free_result(result);
-				return NULL;
-			}
-
-			/* Copy data for each row */
-			for (row = 0; row < result->rows; row++)
-			{
-				HeapTuple	tuple = tuptable->vals[row];
-
-				result->values[row] = (char **) malloc(result->cols * sizeof(char *));
-				if (!result->values[row])
-				{
-					snprintf(pg_error_msg, sizeof(pg_error_msg), "Out of memory");
-					pg_embedded_free_result(result);
-					return NULL;
-				}
-
-				/* Get each column value */
-				for (col = 0; col < result->cols; col++)
-				{
-					char	   *str;
-
-					str = SPI_getvalue(tuple, tupdesc, col + 1);
-
-					if (str == NULL)
-						result->values[row][col] = NULL;
-					else
-					{
-						result->values[row][col] = strdup(str);
-						pfree(str);
-					}
-				}
 			}
 		}
 

@@ -17,7 +17,7 @@ top_builddir = ../..
 include $(top_builddir)/src/Makefile.global
 
 SUBDIRS = access archive backup bootstrap catalog parser commands executor \
-	embedded foreign lib libpq \
+	foreign lib libpq \
 	main nodes optimizer partitioning port postmaster \
 	regex replication rewrite \
 	statistics storage tcop tsearch utils $(top_builddir)/src/timezone \
@@ -65,32 +65,10 @@ ifneq ($(PORTNAME), cygwin)
 ifneq ($(PORTNAME), win32)
 
 postgres: $(OBJS)
-	# $(CC) $(CFLAGS) $(call expand_subsys,$^) $(LDFLAGS) $(LIBS) -o $@
-	echo skipping postgres
+	$(CC) $(CFLAGS) $(call expand_subsys,$^) $(LDFLAGS) $(LIBS) -o $@
 
 endif
 endif
-
-##########################################################################
-# Static library target for embedded use
-
-libpostgres_server.a: $(filter-out main/objfiles.txt,$(SUBDIROBJS)) $(top_builddir)/src/common/libpgcommon_srv.a $(top_builddir)/src/port/libpgport_srv.a
-	rm -f $@
-	@echo "Creating static library $@..."
-	$(AR) $(AROPT) $@ $(call expand_subsys,$(filter-out main/objfiles.txt,$(SUBDIROBJS)))
-	@echo "Extracting objects from libpgcommon_srv.a..."
-	@mkdir -p .tmp_common && cd .tmp_common && $(AR) x ../$(top_builddir)/src/common/libpgcommon_srv.a && $(AR) $(AROPT) ../$@ *.o && cd .. && rm -rf .tmp_common
-	@echo "Extracting objects from libpgport_srv.a..."
-	@mkdir -p .tmp_port && cd .tmp_port && $(AR) x ../$(top_builddir)/src/port/libpgport_srv.a && $(AR) $(AROPT) ../$@ *.o && cd .. && rm -rf .tmp_port
-	@echo "Adding timezone objects..."
-	$(AR) $(AROPT) $@ $(top_builddir)/src/timezone/localtime.o $(top_builddir)/src/timezone/pgtz.o $(top_builddir)/src/timezone/strftime.o
-	@echo "Running ranlib..."
-	ranlib $@
-	@echo "Library $@ created successfully"
-	@echo "Object count: $$($(AR) t $@ | wc -l)"
-
-.PHONY: libpostgres_server
-libpostgres_server: libpostgres_server.a
 
 ifeq ($(PORTNAME), cygwin)
 
