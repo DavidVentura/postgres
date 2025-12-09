@@ -23,21 +23,6 @@ const char *progname = "postgres_embedded";
  */
 int optreset = 0;
 
-/*
- * sigsetjmp - Wrappers for setjmp
- *
- * PostgreSQL uses sigsetjmp/siglongjmp for error handling (PG_TRY/PG_CATCH).
- * These are normally provided by libc, but when linking from languages like
- * Rust that use -nodefaultlibs, we need to provide them.
- *
- * We implement them as simple wrappers around setjmp/longjmp since we don't
- * need signal mask saving in embedded mode.
- */
-int sigsetjmp(sigjmp_buf env, int savemask)
-{
-	(void) savemask;  /* unused - we don't save signal mask */
-	return setjmp(env);
-}
 
 /*
  * parse_dispatch_option - Parse dispatch option from command line

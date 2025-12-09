@@ -95,6 +95,37 @@ int pg_embedded_commit(void);
 int pg_embedded_rollback(void);
 
 /*
+ * Configuration
+ */
+
+/* Performance configuration options */
+typedef struct pg_embedded_config
+{
+	bool fsync;                  /* Enable fsync (default: true) */
+	bool synchronous_commit;     /* Enable synchronous commit (default: true) */
+	bool full_page_writes;       /* Enable full page writes (default: true) */
+} pg_embedded_config;
+
+/* Set performance configuration
+ *
+ * config: Pointer to configuration struct with performance settings
+ *
+ * IMPORTANT: Call this BEFORE pg_embedded_init()
+ *
+ * WARNING: Disabling fsync/synchronous_commit risks data loss on crash!
+ *
+ * Usage example:
+ *   pg_embedded_config config = {
+ *       .fsync = false,               // Disable fsync (like postgres -F)
+ *       .synchronous_commit = false,  // Don't wait for WAL writes
+ *       .full_page_writes = false     // Disable full page writes
+ *   };
+ *   pg_embedded_set_config(&config);
+ *   pg_embedded_init(data_dir, dbname, username);
+ */
+void pg_embedded_set_config(const pg_embedded_config *config);
+
+/*
  * Error handling
  */
 

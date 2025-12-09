@@ -125,6 +125,7 @@ main(int argc, char **argv)
 	result = pg_embedded_exec("DROP TABLE IF EXISTS test_embedded");
 	pg_embedded_free_result(result);
 
+	printf("Test 2: RUN CREATE 1\n");
 	result = pg_embedded_exec(
 							  "CREATE TABLE test_embedded ("
 							  "  id SERIAL PRIMARY KEY,"
@@ -139,6 +140,22 @@ main(int argc, char **argv)
 	print_result(result);
 	pg_embedded_free_result(result);
 
+	printf("Test 2: RUN CREATE 2\n");
+	// force recreate table to test errors
+	result = pg_embedded_exec(
+							  "CREATE TABLE test_embedded ("
+							  "  id SERIAL PRIMARY KEY,"
+							  "  name TEXT NOT NULL,"
+							  "  value INTEGER"
+							  ")");
+	printf("DEBUG: Error message is: '%s'\n", pg_embedded_error_message());
+	if (result && result->status < 0)
+	{
+		fprintf(stderr, "ERROR: CREATE TABLE failed: %s\n", pg_embedded_error_message());
+	}
+	print_result(result);
+
+	pg_embedded_free_result(result);
 	/* Test 3: Insert data */
 	printf("----------------------------------------\n");
 	printf("Test 3: Insert test data\n");
@@ -305,8 +322,8 @@ main(int argc, char **argv)
 	printf("----------------------------------------\n");
 	printf("Cleanup\n");
 	printf("----------------------------------------\n");
-	result = pg_embedded_exec("DROP TABLE test_embedded");
-	pg_embedded_free_result(result);
+	//result = pg_embedded_exec("DROP TABLE test_embedded");
+	//pg_embedded_free_result(result);
 
 	printf("\nShutting down PostgreSQL...\n");
 	pg_embedded_shutdown();

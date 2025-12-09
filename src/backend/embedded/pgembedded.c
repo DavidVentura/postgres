@@ -12,6 +12,7 @@
  *
  *-------------------------------------------------------------------------
  */
+
 #include "postgres.h"
 
 #include <stdlib.h>
@@ -38,9 +39,23 @@
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
 
+// from fd.c
+#define  NUM_RESERVED_FDS 10
 /* Static state */
 static bool pg_initialized = false;
 static char pg_error_msg[1024] = {0};
+
+/* Pre-initialization config settings */
+static struct {
+	bool fsync;
+	bool synchronous_commit;
+	bool full_page_writes;
+} preinit_config = {
+	.fsync = true,                  /* default: enabled */
+	.synchronous_commit = true,     /* default: enabled */
+	.full_page_writes = true        /* default: enabled */
+};
+
 
 /*
  * pg_embedded_initdb
@@ -113,6 +128,7 @@ pg_embedded_init_internal(const char *data_dir, const char *dbname,
 		 * Set up the executable path. For embedded use, we use argv[0] which
 		 * should be set to progname. If my_exec_path hasn't been set yet,
 		 * find it now.
+
 		if (my_exec_path[0] == '\0')
 		{
 			if (find_my_exec(progname, my_exec_path) < 0)
@@ -131,6 +147,7 @@ pg_embedded_init_internal(const char *data_dir, const char *dbname,
 		/* Initialize as standalone backend */
 		InitStandaloneProcess(progname);
 
+
 		/*
 		 * Set up signal handlers for standalone mode.
 		 * This is critical - without these, checkpoints and other operations
@@ -148,17 +165,27 @@ pg_embedded_init_internal(const char *data_dir, const char *dbname,
 		InitializeGUCOptions();
 
 		/*
+		 * Apply pre-initialization performance config
+		 */
+		SetConfigOption("fsync", preinit_config.fsync ? "true" : "false",
+						PGC_POSTMASTER, PGC_S_ARGV);
+
+		SetConfigOption("synchronous_commit", preinit_config.synchronous_commit ? "on" : "off",
+						PGC_POSTMASTER, PGC_S_ARGV);
+
+		SetConfigOption("full_page_writes", preinit_config.full_page_writes ? "on" : "off",
+						PGC_POSTMASTER, PGC_S_ARGV);
+
+		/*
 		 * Enable system table modifications if requested (needed for initdb).
 		 * This must be set before SelectConfigFiles() is called.
 		 */
 		if (allow_system_table_mods)
 		{
-			fprintf(stderr, "[DEBUG] Enabling allow_system_table_mods\n");
 			SetConfigOption("allow_system_table_mods", "true", PGC_POSTMASTER, PGC_S_ARGV);
 		}
 		else
 		{
-			fprintf(stderr, "[DEBUG] NOT enabling allow_system_table_mods\n");
 		}
 
 		/* Load configuration files */
@@ -217,7 +244,8 @@ pg_embedded_init_internal(const char *data_dir, const char *dbname,
 		 * Estimate number of openable files.  This must happen after setting up
 		 * semaphores, because on some platforms semaphores count as open files.
 		 */
-		set_max_safe_fds();
+		// set_max_safe_fds();
+		max_safe_fds = 1024 - NUM_RESERVED_FDS;
 
 		/*
 		 * Remember stand-alone backend startup time,roughly at the same point
@@ -390,6 +418,11 @@ pg_embedded_exec(const char *query)
 {
 	pg_result  *result;
 	int			ret;
+	volatile bool	implicit_tx = false;
+	volatile bool	spi_connected = false;
+	volatile bool	snapshot_pushed = false;
+	ErrorData  *edata;
+
 
 	if (!pg_initialized)
 	{
@@ -415,7 +448,6 @@ pg_embedded_exec(const char *query)
 
 	PG_TRY();
 	{
-		bool		implicit_tx = false;
 
 		/*
 		 * Transaction Handling Strategy:
@@ -428,77 +460,86 @@ pg_embedded_exec(const char *query)
 			StartTransactionCommand();
 			implicit_tx = true;
 		}
+		else
+		{
+		}
 
 		/*
 		 * SPI requires a snapshot to be active.
 		 * Push an active snapshot for query execution.
 		 */
 		PushActiveSnapshot(GetTransactionSnapshot());
+		snapshot_pushed = true;
 
 		/* Connect to SPI for this query */
 		if (SPI_connect() != SPI_OK_CONNECT)
 		{
 			snprintf(pg_error_msg, sizeof(pg_error_msg), "SPI_connect failed");
-			PopActiveSnapshot();
-			if (implicit_tx)
-				AbortCurrentTransaction();
 			result->status = -1;
-			return result;
 		}
-
-		/* Execute query via SPI */
-		ret = SPI_execute(query, false, 0);		/* false = read-write, 0 = no
-												 * row limit */
-
-		result->status = ret;
-		result->rows = SPI_processed;
-		result->cols = 0;
-		result->values = NULL;
-		result->colnames = NULL;
-
-		if (ret < 0)
+		else
 		{
-			snprintf(pg_error_msg, sizeof(pg_error_msg),
-					 "Query execution failed with code: %d", ret);
-			PopActiveSnapshot();
-			if (implicit_tx)
-				AbortCurrentTransaction();
-			return result;
-		}
+			spi_connected = true;
 
-		/*
-		 * Copy data for queries with results (SELECT or RETURNING)
-		 */
-		if (ret > 0 && SPI_tuptable != NULL)
-		{
-			if (copy_tuptable(result, SPI_tuptable) != 0)
+			/* Execute query via SPI */
+			ret = SPI_execute(query, false, 0);		/* false = read-write, 0 = no
+													 * row limit */
+
+			result->status = ret;
+			result->rows = SPI_processed;
+			result->cols = 0;
+			result->values = NULL;
+			result->colnames = NULL;
+
+			if (ret >= 0 && ret > 0 && SPI_tuptable != NULL)
 			{
-				pg_embedded_free_result(result);
-				return NULL;
+				/*
+				 * Copy data for queries with results (SELECT or RETURNING)
+				 */
+				if (copy_tuptable(result, SPI_tuptable) != 0)
+				{
+					pg_embedded_free_result(result);
+					result = NULL;
+				}
 			}
 		}
 
-		/* Disconnect from SPI */
-		SPI_finish();
+		/* Always disconnect from SPI if we connected */
+		if (spi_connected)
+		{
+			SPI_finish();
+			spi_connected = false;
+		}
 
-		/*
-		 * Pop the active snapshot.
-		 */
-		PopActiveSnapshot();
+		/* Always pop the snapshot */
+		if (snapshot_pushed)
+		{
+			PopActiveSnapshot();
+		}
 
-		/*
-		 * If we started the transaction implicitly (auto-commit mode),
-		 * commit it now. Otherwise, the transaction was started explicitly
-		 * via pg_embedded_begin() and the caller will manage it.
-		 */
-		if (implicit_tx)
-			CommitTransactionCommand();
+		/* Handle success or failure */
+		if (result != NULL && result->status >= 0)
+		{
+			/* Success - commit if implicit transaction */
+			if (implicit_tx)
+			{
+				CommitTransactionCommand();
+			}
+		}
+		else
+		{
+			/* Failure - abort if implicit transaction */
+			if (implicit_tx)
+			{
+				AbortCurrentTransaction();
+			}
+		}
 	}
 	PG_CATCH();
 	{
-		ErrorData  *edata;
+		fprintf(stderr, "[WARN] In PG_CATCH\n");
 
-		/* Get error data and copy message before aborting */
+		/* Get error data and copy message before cleanup */
 		edata = CopyErrorData();
 		FlushErrorState();
 
@@ -506,17 +547,22 @@ pg_embedded_exec(const char *query)
 				 "Query failed: %s", edata->message);
 
 		/*
-		 * Abort the current transaction BEFORE freeing error data.
-		 * This ensures we don't try to free memory from destroyed contexts.
+		 * Clean up in the error path.
+		 * SPI_finish() and PopActiveSnapshot() will be called during
+		 * AbortCurrentTransaction(), so we don't need to call them explicitly.
+		 * Just make sure we don't leave the snapshot stack corrupted.
 		 */
-		AbortCurrentTransaction();
 
-		/* Now it's safe to free - but DON'T call FreeErrorData after abort */
-		/* The memory will be cleaned up by the memory context reset */
+		/*
+		 * Abort the current transaction.
+		 * This resets memory contexts and cleans up resources.
+		 */
+		if (snapshot_pushed) PopActiveSnapshot();
+		if (spi_connected) SPI_finish();
+		AbortCurrentTransaction();
 
 		/* Clean up and return partial result with error */
 		result->status = -1;
-		return result;
 	}
 	PG_END_TRY();
 
@@ -682,6 +728,24 @@ pg_embedded_rollback(void)
 	PG_END_TRY();
 
 	return 0;
+}
+
+/*
+ * pg_embedded_set_config
+ *
+ * Set performance configuration before initialization
+ *
+ * IMPORTANT: Must be called BEFORE pg_embedded_init()
+ */
+void
+pg_embedded_set_config(const pg_embedded_config *config)
+{
+	if (config)
+	{
+		preinit_config.fsync = config->fsync;
+		preinit_config.synchronous_commit = config->synchronous_commit;
+		preinit_config.full_page_writes = config->full_page_writes;
+	}
 }
 
 /*
